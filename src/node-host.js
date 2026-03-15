@@ -32,6 +32,7 @@ export async function createService(configPath) {
     openTimeoutMs: config.gateway.openTimeoutMs,
     eventTimeoutMs: config.gateway.eventTimeoutMs,
     requestTimeoutMs: config.gateway.requestTimeoutMs,
+    handshakeProfile: config.gateway.handshakeProfile,
     identity,
     nodeInfo: {
       displayName: config.node.displayName,

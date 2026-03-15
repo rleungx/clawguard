@@ -54,3 +54,22 @@ test("config fails closed on malformed JSON", async () => {
     (error) => error.code === "INVALID_CONFIG_JSON" && error.details?.filePath === configPath
   );
 });
+
+test("config defaults handshake profile to auto and allows override", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-config-"));
+  const defaultConfigPath = path.join(tempDir, "default.config.json");
+  const legacyConfigPath = path.join(tempDir, "legacy.config.json");
+
+  await fs.writeFile(defaultConfigPath, JSON.stringify({}, null, 2), "utf8");
+  await fs.writeFile(
+    legacyConfigPath,
+    JSON.stringify({ gateway: { handshakeProfile: "legacy" } }, null, 2),
+    "utf8"
+  );
+
+  const defaultConfig = await loadConfig(defaultConfigPath, { readJsonFile });
+  const legacyConfig = await loadConfig(legacyConfigPath, { readJsonFile });
+
+  assert.equal(defaultConfig.gateway.handshakeProfile, "auto");
+  assert.equal(legacyConfig.gateway.handshakeProfile, "legacy");
+});

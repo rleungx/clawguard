@@ -10,6 +10,7 @@ const DEFAULT_CONFIG = {
     openTimeoutMs: 10000,
     eventTimeoutMs: 10000,
     requestTimeoutMs: 15000,
+    handshakeProfile: "auto",
     tokenEnv: "OPENCLAW_GATEWAY_TOKEN",
     token: null
   },
