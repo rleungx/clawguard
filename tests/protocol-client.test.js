@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PROTOCOL_VERSION } from "../src/constants.js";
+import { OPENCLAW_NODE_HOST_CLIENT_ID, PROTOCOL_VERSION } from "../src/constants.js";
 import { ProtocolClient } from "../src/protocol-client.js";
 
 class FakeWebSocket {
@@ -181,12 +181,26 @@ test("protocol client completes handshake and persists returned device token", a
 
     const connectFrame = socket.sentFrames[0];
     assert.equal(connectFrame.method, "connect");
-    assert.equal(connectFrame.params.protocolVersion, PROTOCOL_VERSION);
-    assert.equal(connectFrame.params.role.type, "node");
-    assert.deepEqual(connectFrame.params.role.commands, ["system.which"]);
-    assert.equal(connectFrame.params.role.browserToolsEnabled, true);
-    assert.equal(connectFrame.params.role.browserProxyEnabled, true);
+    assert.equal(connectFrame.params.client.id, OPENCLAW_NODE_HOST_CLIENT_ID);
+    assert.equal(connectFrame.params.minProtocol, PROTOCOL_VERSION);
+    assert.equal(connectFrame.params.maxProtocol, PROTOCOL_VERSION);
+    assert.equal(connectFrame.params.role, "node");
+    assert.deepEqual(connectFrame.params.commands, ["system.which"]);
+    assert.deepEqual(connectFrame.params.caps, ["system"]);
+    assert.deepEqual(connectFrame.params.permissions, { exec: true });
     assert.equal(connectFrame.params.auth.token, "gateway-token");
+    assert.deepEqual(connectFrame.params.device, {
+      id: "node-1",
+      publicKey: "public-key",
+      signature: "signature",
+      signedAt: 123,
+      nonce: "nonce-1",
+      token: "gateway-token",
+      clientId: OPENCLAW_NODE_HOST_CLIENT_ID,
+      clientMode: "node",
+      role: "node",
+      scopes: []
+    });
 
     socket.emit("message", {
       data: JSON.stringify({
@@ -203,6 +217,130 @@ test("protocol client completes handshake and persists returned device token", a
     const result = await connectPromise;
     assert.equal(result.protocol, PROTOCOL_VERSION);
     assert.deepEqual(persistedTokens, ["persisted-device-token"]);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("protocol client can build the legacy handshake profile", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  FakeWebSocket.instances.length = 0;
+
+  try {
+    const client = createClient({
+      handshakeProfile: "legacy",
+      identity: {
+        nodeId: "node-1",
+        deviceToken: null,
+        buildSignedDevice({ nonce }) {
+          return {
+            id: "node-1",
+            publicKey: "public-key",
+            signature: "signature",
+            signedAt: 123,
+            nonce
+          };
+        },
+        async persistDeviceToken() {}
+      }
+    });
+    const connectPromise = client.connect();
+    const socket = FakeWebSocket.instances[0];
+
+    socket.emit("open");
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "event",
+        event: "connect.challenge",
+        payload: { nonce: "nonce-legacy" }
+      })
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const connectFrame = socket.sentFrames[0];
+    assert.equal(connectFrame.params.protocolVersion, PROTOCOL_VERSION);
+    assert.equal(connectFrame.params.client.id, "secure-node");
+    assert.equal(connectFrame.params.role.type, "node");
+    assert.equal(connectFrame.params.device.nonce, "nonce-legacy");
+
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "res",
+        id: connectFrame.id,
+        ok: true,
+        payload: {
+          protocol: PROTOCOL_VERSION
+        }
+      })
+    });
+
+    const result = await connectPromise;
+    assert.equal(result.protocol, PROTOCOL_VERSION);
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
+
+test("protocol client falls back to legacy handshake after modern schema rejection", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  FakeWebSocket.instances.length = 0;
+
+  try {
+    const client = createClient({ handshakeProfile: "auto" });
+    const connectPromise = client.connect();
+    const socket = FakeWebSocket.instances[0];
+
+    socket.emit("open");
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "event",
+        event: "connect.challenge",
+        payload: { nonce: "nonce-auto" }
+      })
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const modernFrame = socket.sentFrames[0];
+    assert.equal(modernFrame.params.client.id, OPENCLAW_NODE_HOST_CLIENT_ID);
+    assert.equal(modernFrame.params.role, "node");
+
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "res",
+        id: modernFrame.id,
+        ok: false,
+        error: {
+          code: "INVALID_PARAMS",
+          message: "unexpected property 'protocolVersion'"
+        }
+      })
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const legacyFrame = socket.sentFrames[1];
+    assert.equal(legacyFrame.params.protocolVersion, PROTOCOL_VERSION);
+    assert.equal(legacyFrame.params.client.id, "secure-node");
+    assert.equal(legacyFrame.params.role.type, "node");
+
+    socket.emit("message", {
+      data: JSON.stringify({
+        type: "res",
+        id: legacyFrame.id,
+        ok: true,
+        payload: {
+          protocol: PROTOCOL_VERSION
+        }
+      })
+    });
+
+    const result = await connectPromise;
+    assert.equal(result.protocol, PROTOCOL_VERSION);
+    assert.equal(client.preferredHandshakeProfile, "legacy");
   } finally {
     globalThis.WebSocket = originalWebSocket;
   }

@@ -1,8 +1,15 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 
-import { APP_ID, APP_VERSION, PROTOCOL_VERSION } from "./constants.js";
+import { APP_ID, APP_VERSION, OPENCLAW_NODE_HOST_CLIENT_ID, PROTOCOL_VERSION } from "./constants.js";
 import { parseJsonText } from "./fs-util.js";
+
+const HANDSHAKE_PROFILE_MODERN = "modern";
+const HANDSHAKE_PROFILE_LEGACY = "legacy";
+
+function normalizeHandshakeProfile(value) {
+  return value === HANDSHAKE_PROFILE_LEGACY || value === HANDSHAKE_PROFILE_MODERN ? value : "auto";
+}
 
 function protocolError(message, code = "PROTOCOL_ERROR", details = undefined) {
   const error = new Error(message);
@@ -11,15 +18,42 @@ function protocolError(message, code = "PROTOCOL_ERROR", details = undefined) {
   return error;
 }
 
-function buildClientMetadata(nodeInfo) {
+function buildClientMetadata(nodeInfo, profile) {
   return {
-    id: APP_ID,
+    id: profile === HANDSHAKE_PROFILE_MODERN ? OPENCLAW_NODE_HOST_CLIENT_ID : APP_ID,
     displayName: nodeInfo.displayName,
     version: APP_VERSION,
     platform: nodeInfo.platform,
     mode: "node",
-    instanceId: crypto.randomUUID()
+    instanceId: crypto.randomUUID(),
+    ...(profile === HANDSHAKE_PROFILE_MODERN && nodeInfo.deviceFamily ? { deviceFamily: nodeInfo.deviceFamily } : {})
   };
+}
+
+function handshakeErrorText(error) {
+  return `${error?.message || ""} ${JSON.stringify(error?.details || {})}`.toLowerCase();
+}
+
+function isHandshakeSchemaMismatch(error) {
+  if (!error) {
+    return false;
+  }
+
+  if (error.code === "INVALID_PARAMS") {
+    return true;
+  }
+
+  const text = handshakeErrorText(error);
+  return [
+    "unexpected property",
+    "must be string",
+    "must be equal to constant",
+    "missing publickey",
+    "missing signature",
+    "missing signedat",
+    "missing nonce",
+    "invalid connect params"
+  ].some((snippet) => text.includes(snippet));
 }
 
 function frameType(frame) {
@@ -41,6 +75,7 @@ export class ProtocolClient extends EventEmitter {
     openTimeoutMs = 10000,
     eventTimeoutMs = 10000,
     requestTimeoutMs = 15000,
+    handshakeProfile = "auto",
     identity,
     nodeInfo,
     auditLogger
@@ -51,6 +86,8 @@ export class ProtocolClient extends EventEmitter {
     this.openTimeoutMs = openTimeoutMs;
     this.eventTimeoutMs = eventTimeoutMs;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.handshakeProfile = normalizeHandshakeProfile(handshakeProfile);
+    this.preferredHandshakeProfile = this.handshakeProfile === HANDSHAKE_PROFILE_LEGACY ? HANDSHAKE_PROFILE_LEGACY : HANDSHAKE_PROFILE_MODERN;
     this.identity = identity;
     this.nodeInfo = nodeInfo;
     this.auditLogger = auditLogger;
@@ -109,23 +146,95 @@ export class ProtocolClient extends EventEmitter {
     );
 
     const challenge = await this.waitForAnyEvent(["connect.challenge", "session.welcome"]);
-    const client = buildClientMetadata(this.nodeInfo);
-    const gatewayToken = this.identity.deviceToken || this.gatewayToken || null;
-    const connectResult = await this.sendRequest("connect", {
+    const connectResult = await this.connectWithCompatibleProfiles(challenge);
+
+    const returnedDeviceToken = connectResult?.auth?.deviceToken || connectResult?.deviceToken || null;
+    if (returnedDeviceToken) {
+      await this.identity.persistDeviceToken(returnedDeviceToken);
+    }
+
+    await this.auditLogger.write({
+      kind: "gateway-connected",
+      gatewayUrl: this.gatewayUrl,
+      nodeId: this.identity.nodeId,
+      protocol: connectResult?.protocol || PROTOCOL_VERSION
+    });
+
+    return connectResult;
+  }
+
+  async connectWithCompatibleProfiles(challenge) {
+    const profiles = this.resolveHandshakeProfiles();
+    let lastError = null;
+
+    for (const profile of profiles) {
+      try {
+        const connectResult = await this.sendRequest("connect", this.buildConnectParams(profile, challenge));
+        this.preferredHandshakeProfile = profile;
+        return connectResult;
+      } catch (error) {
+        lastError = error;
+        if (!(this.handshakeProfile === "auto" && profile === HANDSHAKE_PROFILE_MODERN && isHandshakeSchemaMismatch(error))) {
+          throw error;
+        }
+        this.preferredHandshakeProfile = HANDSHAKE_PROFILE_LEGACY;
+      }
+    }
+
+    throw lastError;
+  }
+
+  resolveHandshakeProfiles() {
+    if (this.handshakeProfile === HANDSHAKE_PROFILE_MODERN) {
+      return [HANDSHAKE_PROFILE_MODERN];
+    }
+
+    if (this.handshakeProfile === HANDSHAKE_PROFILE_LEGACY) {
+      return [HANDSHAKE_PROFILE_LEGACY];
+    }
+
+    return this.preferredHandshakeProfile === HANDSHAKE_PROFILE_LEGACY
+      ? [HANDSHAKE_PROFILE_LEGACY]
+      : [HANDSHAKE_PROFILE_MODERN, HANDSHAKE_PROFILE_LEGACY];
+  }
+
+  buildConnectParams(profile, challenge) {
+    const client = buildClientMetadata(this.nodeInfo, profile);
+    const gatewayToken = this.gatewayToken || this.identity.deviceToken || null;
+    const signedDevice = this.identity.buildSignedDevice({
+      nonce: challenge?.nonce || "",
+      token: gatewayToken,
+      clientId: client.id,
+      clientMode: client.mode,
+      role: "node",
+      scopes: []
+    });
+
+    if (profile === HANDSHAKE_PROFILE_MODERN) {
+      return {
+        minProtocol: PROTOCOL_VERSION,
+        maxProtocol: PROTOCOL_VERSION,
+        client,
+        ...(this.nodeInfo.caps?.length ? { caps: this.nodeInfo.caps } : {}),
+        ...(this.nodeInfo.commands?.length ? { commands: this.nodeInfo.commands } : {}),
+        ...(this.nodeInfo.permissions && Object.keys(this.nodeInfo.permissions).length
+          ? { permissions: this.nodeInfo.permissions }
+          : {}),
+        role: "node",
+        scopes: [],
+        ...(gatewayToken ? { auth: { token: gatewayToken } } : {}),
+        device: signedDevice
+      };
+    }
+
+    return {
       protocolVersion: PROTOCOL_VERSION,
       minProtocol: PROTOCOL_VERSION,
       maxProtocol: PROTOCOL_VERSION,
       client,
       auth: gatewayToken ? { token: gatewayToken } : {},
       device: {
-        ...this.identity.buildSignedDevice({
-          nonce: challenge?.nonce || "",
-          token: gatewayToken,
-          clientId: client.id,
-          clientMode: client.mode,
-          role: "node",
-          scopes: []
-        }),
+        ...signedDevice,
         displayName: this.nodeInfo.displayName,
         platform: this.nodeInfo.platform,
         deviceFamily: this.nodeInfo.deviceFamily
@@ -142,21 +251,7 @@ export class ProtocolClient extends EventEmitter {
       },
       locale: Intl.DateTimeFormat().resolvedOptions().locale,
       userAgent: `${APP_ID}/${APP_VERSION}`
-    });
-
-    const returnedDeviceToken = connectResult?.auth?.deviceToken || connectResult?.deviceToken || null;
-    if (returnedDeviceToken) {
-      await this.identity.persistDeviceToken(returnedDeviceToken);
-    }
-
-    await this.auditLogger.write({
-      kind: "gateway-connected",
-      gatewayUrl: this.gatewayUrl,
-      nodeId: this.identity.nodeId,
-      protocol: connectResult?.protocol || PROTOCOL_VERSION
-    });
-
-    return connectResult;
+    };
   }
 
   waitForEvent(eventName) {
