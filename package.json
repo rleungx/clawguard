@@ -1,0 +1,14 @@
+{
+  "name": "secure-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A policy-enforced OpenClaw node host MVP",
+  "bin": {
+    "secure-node": "./bin/secure-node.js"
+  },
+  "scripts": {
+    "start": "node ./bin/secure-node.js run --config ./examples/secure-node.config.json",
+    "test": "node --test"
+  }
+}
