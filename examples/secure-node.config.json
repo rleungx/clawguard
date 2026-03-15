@@ -1,0 +1,74 @@
+{
+  "gateway": {
+    "url": "ws://127.0.0.1:18789",
+    "tokenEnv": "OPENCLAW_GATEWAY_TOKEN",
+    "reconnectMs": 3000,
+    "openTimeoutMs": 10000,
+    "eventTimeoutMs": 10000,
+    "requestTimeoutMs": 15000
+  },
+  "storage": {
+    "dir": "../.secure-node"
+  },
+  "approvals": {
+    "path": "../.secure-node/exec-approvals.json",
+    "askMode": "tty",
+    "askFallback": "deny",
+    "askTimeoutMs": 300000
+  },
+  "audit": {
+    "path": "../.secure-node/audit.jsonl"
+  },
+  "node": {
+    "displayName": "safe-build-node",
+    "browserToolsEnabled": false,
+    "browserProxyEnabled": false
+  },
+  "runner": {
+    "defaultCwd": "..",
+    "maxOutputBytes": 1048576
+  },
+  "policy": {
+    "defaultAction": "deny",
+    "allowShellText": false,
+    "denyPaths": [
+      "~/.ssh/**",
+      "~/.aws/**",
+      "~/.openclaw/**"
+    ],
+    "commandRules": [
+      {
+        "id": "allow-git-readonly",
+        "action": "allow",
+        "match": {
+          "binary": [
+            "/usr/bin/git",
+            "/opt/homebrew/bin/git"
+          ],
+          "argvIncludes": [
+            "status"
+          ]
+        },
+        "cwd": [
+          "../**"
+        ]
+      },
+      {
+        "id": "allow-node-test",
+        "action": "allow",
+        "match": {
+          "binary": [
+            "/usr/bin/node",
+            "/Users/rleungx/.nvm/versions/node/v22.22.1/bin/node"
+          ],
+          "argvIncludes": [
+            "--test"
+          ]
+        },
+        "cwd": [
+          "../**"
+        ]
+      }
+    ]
+  }
+}
