@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { expandHome } from "./fs-util.js";
+import { expandHome, normalizeMatchPath } from "./fs-util.js";
 
 const DEFAULT_CONFIG = {
   gateway: {
@@ -87,10 +87,14 @@ function expandMatchBinaryPatterns(values = [], baseDir) {
   return values.map((value) => {
     const expanded = expandHome(value);
     if (expanded.startsWith(".") || expanded.startsWith("~") || expanded.includes(path.sep)) {
-      return path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
+      return normalizeMatchPath(path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded));
     }
     return value;
   });
+}
+
+function expandMatchPathPatterns(values = [], baseDir) {
+  return values.map((value) => normalizeMatchPath(expandConfigPath(value, baseDir)));
 }
 
 function configError(message, details) {
@@ -195,14 +199,14 @@ export async function loadConfig(filePath, { readJsonFile }) {
     },
     policy: {
       ...merged.policy,
-      denyPaths: (merged.policy.denyPaths || []).map((value) => expandConfigPath(value, baseDir)),
+      denyPaths: expandMatchPathPatterns(merged.policy.denyPaths || [], baseDir),
       commandRules: (merged.policy.commandRules || []).map((rule) => ({
         ...rule,
         match: {
           ...(rule.match || {}),
           binary: expandMatchBinaryPatterns(rule.match?.binary || [], baseDir)
         },
-        cwd: (rule.cwd || []).map((value) => expandConfigPath(value, baseDir))
+        cwd: expandMatchPathPatterns(rule.cwd || [], baseDir)
       }))
     }
   };

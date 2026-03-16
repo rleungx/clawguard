@@ -24,7 +24,10 @@ export function toPosixPath(value) {
 }
 
 export function normalizeMatchPath(value) {
-  const normalized = toPosixPath(path.resolve(value)).replace(/\/+/g, "/");
+  const isWindowsDrivePath = /^[A-Za-z]:[\\/]/.test(value);
+  const isUncPath = value.startsWith("\\\\");
+  const resolved = isWindowsDrivePath || isUncPath ? value : path.resolve(value);
+  const normalized = toPosixPath(resolved).replace(/\/+/g, "/");
   if (normalized.length > 1 && normalized.endsWith("/")) {
     return normalized.slice(0, -1);
   }

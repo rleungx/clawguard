@@ -46,6 +46,36 @@ test("policy allows a matching command rule from the rule root cwd", () => {
   assert.equal(decision.action, "allow");
 });
 
+test("policy normalizes cwd before matching configured patterns", () => {
+  const decision = evaluatePolicy(
+    {
+      policy: {
+        defaultAction: "deny",
+        allowShellText: false,
+        denyPaths: [],
+        commandRules: [
+          {
+            action: "allow",
+            match: {
+              binary: ["git"]
+            },
+            cwd: ["C:/workspace/**"]
+          }
+        ]
+      }
+    },
+    {
+      cwd: "C:\\workspace\\project",
+      argv: ["git", "status"],
+      resolvedBinary: null,
+      binaryName: "git",
+      isShellText: false
+    }
+  );
+
+  assert.equal(decision.action, "allow");
+});
+
 test("policy denies shell text when disabled", () => {
   const decision = evaluatePolicy(baseConfig, {
     cwd: "/workspace/project",

@@ -31,6 +31,7 @@ function ruleMatches(rule, context) {
   const binaryPatterns = rule.match?.binary || [];
   const argvIncludes = rule.match?.argvIncludes || [];
   const requiresShell = rule.match?.shell;
+  const normalizedCwd = normalizeMatchPath(context.cwd);
 
   if (binaryPatterns.length > 0) {
     const candidates = [context.resolvedBinary, context.binaryName].filter(Boolean);
@@ -52,7 +53,7 @@ function ruleMatches(rule, context) {
     return false;
   }
 
-  if (rule.cwd?.length > 0 && !matchesAny(rule.cwd, context.cwd)) {
+  if (rule.cwd?.length > 0 && !matchesAny(rule.cwd, normalizedCwd)) {
     return false;
   }
 
@@ -60,6 +61,8 @@ function ruleMatches(rule, context) {
 }
 
 export function evaluatePolicy(config, context) {
+  const normalizedCwd = normalizeMatchPath(context.cwd);
+
   if (context.isShellText && !config.policy.allowShellText) {
     return {
       source: "policy",
@@ -68,7 +71,7 @@ export function evaluatePolicy(config, context) {
     };
   }
 
-  if (matchesAny(config.policy.denyPaths, context.cwd)) {
+  if (matchesAny(config.policy.denyPaths, normalizedCwd)) {
     return {
       source: "policy",
       action: "deny",
