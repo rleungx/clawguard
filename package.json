@@ -4,6 +4,24 @@
   "private": true,
   "type": "module",
   "description": "A policy-enforced OpenClaw node host MVP",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rleungx/clawguard.git"
+  },
+  "homepage": "https://github.com/rleungx/clawguard",
+  "bugs": {
+    "url": "https://github.com/rleungx/clawguard/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "examples/",
+    "README.md",
+    "SKILL.md"
+  ],
   "bin": {
     "clawguard": "./bin/clawguard.js"
   },
