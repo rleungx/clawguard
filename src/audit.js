@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import { ensureDir, writeTextFileAtomic } from "./fs-util.js";
@@ -10,10 +11,9 @@ export class AuditLogger {
 
   async write(entry) {
     const serialized = `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`;
-    this.queue = this.queue.then(async () => {
+    const operation = this.queue.catch(() => {}).then(async () => {
       await ensureDir(path.dirname(this.filePath));
       try {
-        const fs = await import("node:fs/promises");
         await fs.appendFile(this.filePath, serialized, "utf8");
       } catch (error) {
         if (error.code === "ENOENT") {
@@ -23,6 +23,7 @@ export class AuditLogger {
         throw error;
       }
     });
-    return this.queue;
+    this.queue = operation.catch(() => {});
+    return operation;
   }
 }

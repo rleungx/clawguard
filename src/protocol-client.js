@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
+import { WebSocket as NodeWebSocket } from "ws";
 
 import { APP_ID, APP_VERSION, OPENCLAW_NODE_HOST_CLIENT_ID, PROTOCOL_VERSION } from "./constants.js";
 import { parseJsonText } from "./fs-util.js";
@@ -20,7 +21,7 @@ function protocolError(message, code = "PROTOCOL_ERROR", details = undefined) {
 
 function buildClientMetadata(nodeInfo, profile) {
   return {
-    id: profile === HANDSHAKE_PROFILE_MODERN ? OPENCLAW_NODE_HOST_CLIENT_ID : APP_ID,
+    id: OPENCLAW_NODE_HOST_CLIENT_ID,
     displayName: nodeInfo.displayName,
     version: APP_VERSION,
     platform: nodeInfo.platform,
@@ -43,6 +44,10 @@ function isHandshakeSchemaMismatch(error) {
     return true;
   }
 
+  if (error.code === "INVALID_REQUEST") {
+    return true;
+  }
+
   const text = handshakeErrorText(error);
   return [
     "unexpected property",
@@ -52,7 +57,8 @@ function isHandshakeSchemaMismatch(error) {
     "missing signature",
     "missing signedat",
     "missing nonce",
-    "invalid connect params"
+    "invalid connect params",
+    "device identity mismatch"
   ].some((snippet) => text.includes(snippet));
 }
 
@@ -76,6 +82,7 @@ export class ProtocolClient extends EventEmitter {
     eventTimeoutMs = 10000,
     requestTimeoutMs = 15000,
     handshakeProfile = "auto",
+    webSocketImpl = NodeWebSocket,
     identity,
     nodeInfo,
     auditLogger
@@ -88,6 +95,7 @@ export class ProtocolClient extends EventEmitter {
     this.requestTimeoutMs = requestTimeoutMs;
     this.handshakeProfile = normalizeHandshakeProfile(handshakeProfile);
     this.preferredHandshakeProfile = this.handshakeProfile === HANDSHAKE_PROFILE_LEGACY ? HANDSHAKE_PROFILE_LEGACY : HANDSHAKE_PROFILE_MODERN;
+    this.webSocketImpl = webSocketImpl;
     this.identity = identity;
     this.nodeInfo = nodeInfo;
     this.auditLogger = auditLogger;
@@ -96,92 +104,125 @@ export class ProtocolClient extends EventEmitter {
     this.seenEvents = new Map();
   }
 
-  async connect() {
-    const socket = new WebSocket(this.gatewayUrl);
-    this.socket = socket;
-    let onOpen;
-    let onError;
-
-    socket.addEventListener("message", async (event) => {
-      try {
-        const frame = parseJsonText(String(event.data), {
-          context: "websocket.message",
-          errorCode: "INVALID_FRAME_JSON",
-          errorMessage: "invalid websocket frame JSON",
-          details: {
-            source: "websocket.message"
-          }
-        });
-        await this.handleFrame(frame);
-      } catch (error) {
-        this.emit("error", error);
-      }
-    });
-
-    socket.addEventListener("close", (event) => {
-      for (const pending of this.pending.values()) {
-        pending.reject(protocolError("gateway connection closed", "CONNECTION_CLOSED"));
-      }
-      this.pending.clear();
-      this.emit("close", event);
-    });
-
-    socket.addEventListener("error", (event) => {
-      this.emit("error", protocolError("websocket error", "WEBSOCKET_ERROR", event));
-    });
-
-    await this.withTimeout(
-      new Promise((resolve, reject) => {
-        onOpen = () => resolve();
-        onError = () => reject(protocolError("failed to open websocket", "WEBSOCKET_OPEN_FAILED"));
-        socket.addEventListener("open", onOpen, { once: true });
-        socket.addEventListener("error", onError, { once: true });
-      }),
-      this.openTimeoutMs,
-      () => protocolError("timed out opening websocket", "WEBSOCKET_OPEN_TIMEOUT"),
-      () => {
-        socket.removeEventListener?.("open", onOpen);
-        socket.removeEventListener?.("error", onError);
-      }
-    );
-
-    const challenge = await this.waitForAnyEvent(["connect.challenge", "session.welcome"]);
-    const connectResult = await this.connectWithCompatibleProfiles(challenge);
-
-    const returnedDeviceToken = connectResult?.auth?.deviceToken || connectResult?.deviceToken || null;
-    if (returnedDeviceToken) {
-      await this.identity.persistDeviceToken(returnedDeviceToken);
+  reportError(error) {
+    if (this.listenerCount("error") > 0) {
+      this.emit("error", error);
+      return;
     }
 
-    await this.auditLogger.write({
-      kind: "gateway-connected",
-      gatewayUrl: this.gatewayUrl,
-      nodeId: this.identity.nodeId,
-      protocol: connectResult?.protocol || PROTOCOL_VERSION
-    });
-
-    return connectResult;
+    this.emit("protocol-error", error);
   }
 
-  async connectWithCompatibleProfiles(challenge) {
+  async connect() {
     const profiles = this.resolveHandshakeProfiles();
     let lastError = null;
 
     for (const profile of profiles) {
       try {
-        const connectResult = await this.sendRequest("connect", this.buildConnectParams(profile, challenge));
+        const connectResult = await this.connectWithProfile(profile);
         this.preferredHandshakeProfile = profile;
         return connectResult;
       } catch (error) {
         lastError = error;
-        if (!(this.handshakeProfile === "auto" && profile === HANDSHAKE_PROFILE_MODERN && isHandshakeSchemaMismatch(error))) {
-          throw error;
+        if (this.handshakeProfile === "auto" && profile === HANDSHAKE_PROFILE_MODERN && isHandshakeSchemaMismatch(error)) {
+          continue;
         }
-        this.preferredHandshakeProfile = HANDSHAKE_PROFILE_LEGACY;
+        throw error;
       }
     }
 
     throw lastError;
+  }
+
+  async connectWithProfile(profile) {
+    const wsOptions = {};
+    const gatewayToken = this.gatewayToken || this.identity.deviceToken || null;
+    if (gatewayToken) {
+      wsOptions.headers = {
+        Authorization: `Bearer ${gatewayToken}`
+      };
+    }
+
+    this.seenEvents.clear();
+    this.pending.clear();
+
+    const WebSocketImpl = this.webSocketImpl;
+    const socket = new WebSocketImpl(this.gatewayUrl, [], wsOptions);
+    this.socket = socket;
+    let onOpen;
+    let onError;
+
+    try {
+      socket.addEventListener("message", async (event) => {
+        try {
+          const frame = parseJsonText(String(event.data), {
+            context: "websocket.message",
+            errorCode: "INVALID_FRAME_JSON",
+            errorMessage: "invalid websocket frame JSON",
+            details: {
+              source: "websocket.message"
+            }
+          });
+          await this.handleFrame(frame);
+        } catch (error) {
+          this.reportError(error);
+        }
+      });
+
+      socket.addEventListener("close", (event) => {
+        for (const pending of this.pending.values()) {
+          pending.reject(protocolError("gateway connection closed", "CONNECTION_CLOSED"));
+        }
+        this.pending.clear();
+        this.emit("close", event);
+      });
+
+      socket.addEventListener("error", (event) => {
+        this.reportError(protocolError("websocket error", "WEBSOCKET_ERROR", event));
+      });
+
+      await this.withTimeout(
+        new Promise((resolve, reject) => {
+          onOpen = () => resolve();
+          onError = () => reject(protocolError("failed to open websocket", "WEBSOCKET_OPEN_FAILED"));
+          socket.addEventListener("open", onOpen, { once: true });
+          socket.addEventListener("error", onError, { once: true });
+        }),
+        this.openTimeoutMs,
+        () => protocolError("timed out opening websocket", "WEBSOCKET_OPEN_TIMEOUT"),
+        () => {
+          socket.removeEventListener?.("open", onOpen);
+          socket.removeEventListener?.("error", onError);
+        }
+      );
+
+      const initialHandshakeEvent = await this.waitForAnyEvent(["connect.challenge", "session.welcome"]);
+      const challenge = initialHandshakeEvent?.nonce
+        ? initialHandshakeEvent
+        : await this.waitForEvent("connect.challenge");
+      const params = this.buildConnectParams(profile, challenge);
+      const connectResult = await this.sendRequest("connect", params);
+
+      const returnedDeviceToken = connectResult?.auth?.deviceToken || connectResult?.deviceToken || null;
+      if (returnedDeviceToken) {
+        await this.identity.persistDeviceToken(returnedDeviceToken);
+      }
+
+      await this.auditLogger.write({
+        kind: "gateway-connected",
+        gatewayUrl: this.gatewayUrl,
+        nodeId: this.identity.nodeId,
+        protocol: connectResult?.protocol || PROTOCOL_VERSION
+      });
+
+      return connectResult;
+    } catch (error) {
+      if (this.socket === socket) {
+        this.socket = null;
+      }
+      socket.close?.();
+      throw error;
+    }
   }
 
   resolveHandshakeProfiles() {
@@ -207,7 +248,10 @@ export class ProtocolClient extends EventEmitter {
       clientId: client.id,
       clientMode: client.mode,
       role: "node",
-      scopes: []
+      scopes: [],
+      platform: this.nodeInfo.platform,
+      deviceFamily: this.nodeInfo.deviceFamily,
+      profile
     });
 
     if (profile === HANDSHAKE_PROFILE_MODERN) {
@@ -228,27 +272,13 @@ export class ProtocolClient extends EventEmitter {
     }
 
     return {
-      protocolVersion: PROTOCOL_VERSION,
       minProtocol: PROTOCOL_VERSION,
       maxProtocol: PROTOCOL_VERSION,
       client,
       auth: gatewayToken ? { token: gatewayToken } : {},
-      device: {
-        ...signedDevice,
-        displayName: this.nodeInfo.displayName,
-        platform: this.nodeInfo.platform,
-        deviceFamily: this.nodeInfo.deviceFamily
-      },
-      role: {
-        type: "node",
-        nodeId: this.identity.nodeId,
-        displayName: this.nodeInfo.displayName,
-        commands: this.nodeInfo.commands,
-        caps: this.nodeInfo.caps,
-        permissions: this.nodeInfo.permissions,
-        browserToolsEnabled: this.nodeInfo.browserToolsEnabled ?? false,
-        browserProxyEnabled: this.nodeInfo.browserProxyEnabled ?? false
-      },
+      device: signedDevice,
+      role: "node",
+      scopes: [],
       locale: Intl.DateTimeFormat().resolvedOptions().locale,
       userAgent: `${APP_ID}/${APP_VERSION}`
     };
@@ -353,14 +383,13 @@ export class ProtocolClient extends EventEmitter {
   }
 
   async sendRequest(method, params) {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+    if (!this.socket || this.socket.readyState !== 1) {
       throw protocolError("websocket is not connected", "NOT_CONNECTED");
     }
 
     const id = crypto.randomUUID();
     const frame = {
       type: "req",
-      t: "req",
       id,
       method,
       params
@@ -409,32 +438,37 @@ export class ProtocolClient extends EventEmitter {
   }
 
   sendResponse(id, result) {
-    this.socket.send(
-      JSON.stringify({
-        type: "res",
-        t: "res",
-        id,
-        ok: true,
-        payload: result,
-        result
-      })
-    );
+    return this.sendFrame({
+      type: "res",
+      t: "res",
+      id,
+      ok: true,
+      payload: result,
+      result
+    });
   }
 
   sendError(id, error) {
-    this.socket.send(
-      JSON.stringify({
-        type: "res",
-        t: "res",
-        id,
-        ok: false,
-        error: {
-          code: error.code || "INTERNAL_ERROR",
-          message: error.message || "internal error",
-          data: error.details
-        }
-      })
-    );
+    return this.sendFrame({
+      type: "res",
+      t: "res",
+      id,
+      ok: false,
+      error: {
+        code: error.code || "INTERNAL_ERROR",
+        message: error.message || "internal error",
+        data: error.details
+      }
+    });
+  }
+
+  sendFrame(frame) {
+    if (!this.socket || this.socket.readyState !== 1) {
+      return false;
+    }
+
+    this.socket.send(JSON.stringify(frame));
+    return true;
   }
 
   async sendNodeInvokeResult({ id, nodeId, result, error }) {
@@ -456,5 +490,17 @@ export class ProtocolClient extends EventEmitter {
     }
 
     await this.sendRequest("node.invoke.result", params);
+  }
+
+  close() {
+    const socket = this.socket;
+    this.socket = null;
+
+    if (socket && typeof socket.close === "function") {
+      socket.close();
+      return true;
+    }
+
+    return false;
   }
 }

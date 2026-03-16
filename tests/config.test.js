@@ -8,8 +8,8 @@ import { loadConfig } from "../src/config.js";
 import { readJsonFile } from "../src/fs-util.js";
 
 test("config resolves relative policy paths against config directory", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-config-"));
-  const configPath = path.join(tempDir, "secure-node.config.json");
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-config-"));
+  const configPath = path.join(tempDir, "clawguard.config.json");
   await fs.writeFile(
     configPath,
     JSON.stringify(
@@ -45,8 +45,8 @@ test("config resolves relative policy paths against config directory", async () 
 });
 
 test("config fails closed on malformed JSON", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-config-"));
-  const configPath = path.join(tempDir, "secure-node.config.json");
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-config-"));
+  const configPath = path.join(tempDir, "clawguard.config.json");
   await fs.writeFile(configPath, "{not valid json", "utf8");
 
   await assert.rejects(
@@ -56,7 +56,7 @@ test("config fails closed on malformed JSON", async () => {
 });
 
 test("config defaults handshake profile to auto and allows override", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-config-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-config-"));
   const defaultConfigPath = path.join(tempDir, "default.config.json");
   const legacyConfigPath = path.join(tempDir, "legacy.config.json");
 
@@ -72,4 +72,74 @@ test("config defaults handshake profile to auto and allows override", async () =
 
   assert.equal(defaultConfig.gateway.handshakeProfile, "auto");
   assert.equal(legacyConfig.gateway.handshakeProfile, "legacy");
+});
+
+test("config rejects invalid gateway settings", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-config-"));
+  const configPath = path.join(tempDir, "invalid.config.json");
+  await fs.writeFile(
+    configPath,
+    JSON.stringify(
+      {
+        gateway: {
+          url: "http://127.0.0.1:18789",
+          reconnectMs: -1
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await assert.rejects(
+    loadConfig(configPath, { readJsonFile }),
+    (error) => error.code === "INVALID_CONFIG" && error.details?.key === "gateway.url"
+  );
+});
+
+test("config rejects invalid handshake profiles", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-config-"));
+  const configPath = path.join(tempDir, "invalid-profile.config.json");
+  await fs.writeFile(
+    configPath,
+    JSON.stringify(
+      {
+        gateway: {
+          handshakeProfile: "future"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await assert.rejects(
+    loadConfig(configPath, { readJsonFile }),
+    (error) => error.code === "INVALID_CONFIG" && error.details?.key === "gateway.handshakeProfile"
+  );
+});
+
+test("config rejects invalid logging levels", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-config-"));
+  const configPath = path.join(tempDir, "invalid-logging.config.json");
+  await fs.writeFile(
+    configPath,
+    JSON.stringify(
+      {
+        logging: {
+          level: "debug"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await assert.rejects(
+    loadConfig(configPath, { readJsonFile }),
+    (error) => error.code === "INVALID_CONFIG" && error.details?.key === "logging.level"
+  );
 });

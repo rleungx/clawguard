@@ -17,9 +17,142 @@ function asError(error) {
   return wrapped;
 }
 
+function isConnectionReplyError(error) {
+  return error?.code === "NOT_CONNECTED" || error?.code === "CONNECTION_CLOSED" || error?.code === "REQUEST_TIMEOUT";
+}
+
+async function safeAuditWrite(auditLogger, entry) {
+  try {
+    await auditLogger.write(entry);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function sendNodeInvokeResultSafely(protocolClient, payload) {
+  try {
+    await protocolClient.sendNodeInvokeResult(payload);
+    return true;
+  } catch (error) {
+    if (isConnectionReplyError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function recordDroppedReply(auditLogger, payload, error) {
+  await safeAuditWrite(auditLogger, {
+    kind: "reply-drop",
+    replyType: payload.result !== undefined ? "result" : "error",
+    requestId: payload.id,
+    nodeId: payload.nodeId,
+    message: error.message,
+    code: error.code || null,
+    details: error.details || null
+  });
+}
+
+export function waitForClientDisconnectOrShutdown(protocolClient, shutdownSignal) {
+  return new Promise((resolve, reject) => {
+    let unsubscribeStop = () => {};
+
+    const cleanup = () => {
+      protocolClient.off("close", onClose);
+      protocolClient.off("error", onError);
+      unsubscribeStop();
+    };
+
+    const onClose = (event) => {
+      cleanup();
+      resolve({ type: "close", event });
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onStop = () => {
+      cleanup();
+      resolve({ type: "shutdown" });
+    };
+
+    protocolClient.once("close", onClose);
+    protocolClient.once("error", onError);
+
+    unsubscribeStop = shutdownSignal.onStop(onStop);
+  });
+}
+
+export function computeReconnectDelay(baseDelayMs, attempt, random = Math.random) {
+  const safeBaseDelayMs = Math.max(1, Math.floor(baseDelayMs));
+  const exponent = Math.max(0, attempt - 1);
+  const cappedBaseDelay = Math.min(safeBaseDelayMs * (2 ** exponent), 120_000);
+  const jitterFactor = 0.75 + (Math.max(0, Math.min(1, random())) * 0.5);
+  return Math.max(1, Math.round(cappedBaseDelay * jitterFactor));
+}
+
+export function createRuntimeLogger(level, output = console) {
+  const normalizedLevel = ["silent", "error", "info"].includes(level) ? level : "info";
+
+  return {
+    info(message) {
+      if (normalizedLevel === "info") {
+        output.log(message);
+      }
+    },
+    error(message) {
+      if (normalizedLevel === "info" || normalizedLevel === "error") {
+        output.error(message);
+      }
+    }
+  };
+}
+
+function createShutdownController() {
+  let stopped = false;
+  const listeners = new Set();
+  let resolver = null;
+  const stopPromise = new Promise((resolve) => {
+    resolver = resolve;
+  });
+
+  const stop = () => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    for (const listener of listeners) {
+      listener();
+    }
+    listeners.clear();
+    resolver();
+  };
+
+  return {
+    get stopped() {
+      return stopped;
+    },
+    onStop(listener) {
+      if (stopped) {
+        listener();
+        return () => {};
+      }
+
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    stop,
+    stopPromise
+  };
+}
+
 export async function createService(configPath) {
   const config = await loadConfig(configPath, { readJsonFile });
-  await ensureDir(config.storage.dir);
 
   const identity = await loadOrCreateIdentity(config.storage.statePath, config.node.id || null);
   const auditLogger = new AuditLogger(config.audit.path);
@@ -38,18 +171,26 @@ export async function createService(configPath) {
       displayName: config.node.displayName,
       platform: config.node.platform,
       deviceFamily: config.node.deviceFamily,
-      browserToolsEnabled: config.node.browserToolsEnabled,
-      browserProxyEnabled: config.node.browserProxyEnabled,
       caps: ["system"],
       commands: [
         "system.run",
         "system.which",
         "system.execApprovals.get",
         "system.execApprovals.set"
-      ],
-      permissions: {}
+      ]
     },
     auditLogger
+  });
+
+  protocolClient.on("protocol-error", (error) => {
+    void safeAuditWrite(auditLogger, {
+      kind: "protocol-error",
+      nodeId: identity.nodeId,
+      gatewayUrl: config.gateway.url,
+      message: error.message,
+      code: error.code || null,
+      details: error.details || null
+    });
   });
 
   const service = {
@@ -64,16 +205,41 @@ export async function createService(configPath) {
   protocolClient.on("request", async (frame) => {
     const { id, method } = frame;
     const params = frame.params ?? frame.payload;
+    let sent;
 
     try {
       const result = await handleDirectRequest(service, method, params);
-      protocolClient.sendResponse(id, result);
+      sent = protocolClient.sendResponse(id, result);
+      if (!sent) {
+        await safeAuditWrite(auditLogger, {
+          kind: "reply-drop",
+          replyType: "result",
+          requestId: id,
+          method,
+          code: "REPLY_DROPPED",
+          message: "direct response dropped because gateway connection was unavailable"
+        });
+      }
     } catch (error) {
-      protocolClient.sendError(id, asError(error));
+      const outboundError = asError(error);
+      sent = protocolClient.sendError(id, outboundError);
+      if (!sent) {
+        await safeAuditWrite(auditLogger, {
+          kind: "reply-drop",
+          replyType: "error",
+          requestId: id,
+          method,
+          code: "REPLY_DROPPED",
+          message: "direct error response dropped because gateway connection was unavailable",
+          details: outboundError.details || null
+        });
+      }
     }
   });
 
   protocolClient.on("event:node.invoke.request", async (params) => {
+    let replyPayload;
+
     try {
       const result = await handleCommand(
         service,
@@ -89,17 +255,30 @@ export async function createService(configPath) {
         }),
         params.timeoutMs
       );
-      await protocolClient.sendNodeInvokeResult({
+      replyPayload = {
         id: params.id,
         nodeId: identity.nodeId,
         result
-      });
+      };
     } catch (error) {
-      await protocolClient.sendNodeInvokeResult({
+      replyPayload = {
         id: params.id,
         nodeId: identity.nodeId,
         error: asError(error)
-      });
+      };
+    }
+
+    try {
+      const sent = await sendNodeInvokeResultSafely(protocolClient, replyPayload);
+      if (!sent) {
+        await recordDroppedReply(auditLogger, replyPayload, {
+          message: "reply dropped because gateway connection was unavailable",
+          code: "REPLY_DROPPED"
+        });
+      }
+    } catch (error) {
+      const outboundError = asError(error);
+      await recordDroppedReply(auditLogger, replyPayload, outboundError);
     }
   });
 
@@ -261,6 +440,25 @@ function combineDecisions(policyDecision, approvalsDecision) {
 export async function runService(configPath) {
   const service = await createService(configPath);
   const { protocolClient, config, identity } = service;
+  const shutdown = createShutdownController();
+  const logger = createRuntimeLogger(config.logging.level);
+  const startedAt = Date.now();
+  let reconnectAttempt = 0;
+
+  const handleSignal = async (signal) => {
+    await safeAuditWrite(service.auditLogger, {
+      kind: "lifecycle",
+      phase: "shutdown-requested",
+      signal,
+      nodeId: identity.nodeId,
+      uptimeMs: Date.now() - startedAt
+    });
+    protocolClient.close();
+    shutdown.stop();
+  };
+
+  process.once("SIGINT", handleSignal);
+  process.once("SIGTERM", handleSignal);
 
   if (!config.gateway.token && !identity.deviceToken) {
     const error = new Error(
@@ -270,26 +468,77 @@ export async function runService(configPath) {
     throw error;
   }
 
-  while (true) {
+  await safeAuditWrite(service.auditLogger, {
+    kind: "lifecycle",
+    phase: "startup",
+    nodeId: identity.nodeId,
+    gatewayUrl: config.gateway.url,
+    handshakeProfile: config.gateway.handshakeProfile
+  });
+
+  while (!shutdown.stopped) {
+    const connectAttemptStartedAt = Date.now();
     try {
       await protocolClient.connect();
-      console.log(`[secure-node] connected to ${config.gateway.url} as ${identity.nodeId}`);
-      await new Promise((resolve, reject) => {
-        protocolClient.once("close", resolve);
-        protocolClient.once("error", reject);
+      reconnectAttempt = 0;
+      logger.info(`[clawguard] connected to ${config.gateway.url} as ${identity.nodeId}`);
+      await safeAuditWrite(service.auditLogger, {
+        kind: "lifecycle",
+        phase: "connected",
+        nodeId: identity.nodeId,
+        gatewayUrl: config.gateway.url,
+        durationMs: Date.now() - connectAttemptStartedAt
       });
+
+      await waitForClientDisconnectOrShutdown(protocolClient, shutdown);
+
+      if (shutdown.stopped) {
+        break;
+      }
     } catch (error) {
-      console.error(`[secure-node] connection error: ${error.message}`);
-      await service.auditLogger.write({
+      logger.error(`[clawguard] connection error: ${error.message}`);
+      await safeAuditWrite(service.auditLogger, {
         kind: "gateway-error",
         message: error.message,
-        code: error.code || null
+        code: error.code || null,
+        nodeId: identity.nodeId,
+        gatewayUrl: config.gateway.url,
+        attempt: reconnectAttempt + 1,
+        durationMs: Date.now() - connectAttemptStartedAt
       });
     }
 
-    console.log(`[secure-node] reconnecting in ${config.gateway.reconnectMs}ms`);
-    await new Promise((resolve) => {
-      setTimeout(resolve, config.gateway.reconnectMs);
+    if (shutdown.stopped) {
+      break;
+    }
+
+    reconnectAttempt += 1;
+    const reconnectDelayMs = computeReconnectDelay(config.gateway.reconnectMs, reconnectAttempt);
+    logger.info(`[clawguard] reconnecting in ${reconnectDelayMs}ms`);
+    await safeAuditWrite(service.auditLogger, {
+      kind: "lifecycle",
+      phase: "reconnect-scheduled",
+      nodeId: identity.nodeId,
+      gatewayUrl: config.gateway.url,
+      attempt: reconnectAttempt,
+      delayMs: reconnectDelayMs
     });
+
+    await Promise.race([
+      shutdown.stopPromise,
+      new Promise((resolve) => {
+        setTimeout(resolve, reconnectDelayMs);
+      })
+    ]);
   }
+
+  await safeAuditWrite(service.auditLogger, {
+    kind: "lifecycle",
+    phase: "shutdown-complete",
+    nodeId: identity.nodeId,
+    uptimeMs: Date.now() - startedAt
+  });
+
+  process.removeListener("SIGINT", handleSignal);
+  process.removeListener("SIGTERM", handleSignal);
 }

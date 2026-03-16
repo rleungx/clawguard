@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import { ApprovalsStore } from "../src/approvals-store.js";
 
 test("approvals ask on allowlist miss by default", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-"));
   const store = new ApprovalsStore(path.join(tempDir, "exec-approvals.json"));
 
   const decision = await store.evaluate({
@@ -20,7 +20,7 @@ test("approvals ask on allowlist miss by default", async () => {
 });
 
 test("approvals can remember a binary for an agent", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-"));
   const store = new ApprovalsStore(path.join(tempDir, "exec-approvals.json"));
 
   await store.allowBinaryForAgent("demo-agent", "/usr/bin/git");
@@ -35,7 +35,7 @@ test("approvals can remember a binary for an agent", async () => {
 });
 
 test("approvals fail closed on malformed on-disk JSON", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-"));
   const approvalsPath = path.join(tempDir, "exec-approvals.json");
   const store = new ApprovalsStore(approvalsPath);
   await fs.writeFile(approvalsPath, "{not valid json", "utf8");
@@ -51,7 +51,7 @@ test("approvals fail closed on malformed on-disk JSON", async () => {
 });
 
 test("approvals reject malformed snapshot JSON", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-"));
   const approvalsPath = path.join(tempDir, "exec-approvals.json");
   const store = new ApprovalsStore(approvalsPath);
 

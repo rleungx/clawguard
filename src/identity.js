@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { readJsonFile, sha256Hex, writeJsonFileAtomic } from "./fs-util.js";
+import { readJsonFile, writeJsonFileAtomic } from "./fs-util.js";
 
 function exportPrivateKeyPem(privateKey) {
   return privateKey.export({ format: "pem", type: "pkcs8" });
@@ -14,10 +14,11 @@ function buildPublicKeyBase64Url(privateKeyPem) {
 }
 
 function buildDeviceId(publicKeyBase64Url) {
-  return `secure-node-${sha256Hex(publicKeyBase64Url).slice(0, 12)}`;
+  const raw = Buffer.from(publicKeyBase64Url, "base64url");
+  return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
-function buildSignaturePayload({
+function buildSignaturePayloadV2({
   deviceId,
   clientId,
   clientMode,
@@ -27,8 +28,26 @@ function buildSignaturePayload({
   token,
   nonce
 }) {
-  const scopeString = [...scopes].sort().join(",");
-  return `v2|${deviceId}|${clientId}|${clientMode}|${role}|${scopeString}|${signedAt}|${token}|${nonce}`;
+  const scopeString = scopes.join(",");
+  return `v2|${deviceId}|${clientId}|${clientMode}|${role}|${scopeString}|${signedAt}|${token || ""}|${nonce}`;
+}
+
+function buildSignaturePayloadV3({
+  deviceId,
+  clientId,
+  clientMode,
+  role,
+  scopes,
+  signedAt,
+  token,
+  nonce,
+  platform = "linux",
+  deviceFamily = "headless"
+}) {
+  const scopeString = scopes.join(",");
+  const normalizedPlatform = platform.toLowerCase().trim();
+  const normalizedDeviceFamily = deviceFamily.toLowerCase().trim();
+  return `v3|${deviceId}|${clientId}|${clientMode}|${role}|${scopeString}|${signedAt}|${token || ""}|${nonce}|${normalizedPlatform}|${normalizedDeviceFamily}`;
 }
 
 export async function loadOrCreateIdentity(statePath, configuredDeviceId = null) {
@@ -82,18 +101,32 @@ export async function loadOrCreateIdentity(statePath, configuredDeviceId = null)
       state.deviceToken = deviceToken;
       await writeJsonFileAtomic(statePath, state);
     },
-    buildSignedDevice({ nonce, token, clientId, clientMode = "node", role = "node", scopes = [] }) {
+    buildSignedDevice({ nonce, token, clientId, clientMode = "node", role = "node", scopes = [], platform = "linux", deviceFamily = "headless", profile = "modern" }) {
       const signedAt = Date.now();
-      const payload = buildSignaturePayload({
-        deviceId: state.deviceId,
-        clientId,
-        clientMode,
-        role,
-        scopes,
-        signedAt: String(signedAt),
-        token: token || "",
-        nonce
-      });
+      const useV3 = profile !== "legacy";
+      const payload = useV3
+        ? buildSignaturePayloadV3({
+            deviceId: state.deviceId,
+            clientId,
+            clientMode,
+            role,
+            scopes,
+            signedAt: String(signedAt),
+            token: token || "",
+            nonce,
+            platform,
+            deviceFamily
+          })
+        : buildSignaturePayloadV2({
+            deviceId: state.deviceId,
+            clientId,
+            clientMode,
+            role,
+            scopes,
+            signedAt: String(signedAt),
+            token: token || "",
+            nonce
+          });
       const signature = crypto.sign(null, Buffer.from(payload), state.privateKeyPem).toString("base64url");
 
       return {

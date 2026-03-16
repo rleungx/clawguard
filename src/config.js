@@ -1,6 +1,5 @@
 import os from "node:os";
 import path from "node:path";
-
 import { expandHome } from "./fs-util.js";
 
 const DEFAULT_CONFIG = {
@@ -15,17 +14,17 @@ const DEFAULT_CONFIG = {
     token: null
   },
   node: {
-    displayName: `secure-node@${os.hostname()}`,
+    displayName: `clawguard@${os.hostname()}`,
     platform: process.platform,
     deviceFamily: "headless",
     browserToolsEnabled: false,
     browserProxyEnabled: false
   },
   storage: {
-    dir: ".secure-node"
+    dir: ".clawguard"
   },
   approvals: {
-    path: ".secure-node/exec-approvals.json",
+    path: ".clawguard/exec-approvals.json",
     askMode: "tty",
     askFallback: "deny",
     askTimeoutMs: 300000
@@ -54,7 +53,10 @@ const DEFAULT_CONFIG = {
     shell: process.env.SHELL || "/bin/zsh"
   },
   audit: {
-    path: ".secure-node/audit.jsonl"
+    path: ".clawguard/audit.jsonl"
+  },
+  logging: {
+    level: "info"
   }
 };
 
@@ -66,7 +68,6 @@ function deepMerge(baseValue, overrideValue) {
   if (Array.isArray(baseValue) || Array.isArray(overrideValue)) {
     return overrideValue ?? baseValue;
   }
-
   if (isPlainObject(baseValue) && isPlainObject(overrideValue)) {
     const merged = { ...baseValue };
     for (const [key, value] of Object.entries(overrideValue)) {
@@ -74,7 +75,6 @@ function deepMerge(baseValue, overrideValue) {
     }
     return merged;
   }
-
   return overrideValue ?? baseValue;
 }
 
@@ -89,8 +89,72 @@ function expandMatchBinaryPatterns(values = [], baseDir) {
     if (expanded.startsWith(".") || expanded.startsWith("~") || expanded.includes(path.sep)) {
       return path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
     }
-    return expanded;
+    return value;
   });
+}
+
+function configError(message, details) {
+  const error = new Error(message);
+  error.code = "INVALID_CONFIG";
+  error.details = details;
+  return error;
+}
+
+function validatePositiveInteger(value, key, { min = 1, max = 2_147_483_647 } = {}) {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw configError(`invalid ${key}`, { key, value, min, max });
+  }
+}
+
+function validateGatewayUrl(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw configError("invalid gateway.url", { key: "gateway.url", value });
+  }
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw configError("invalid gateway.url", { key: "gateway.url", value });
+  }
+
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw configError("invalid gateway.url", { key: "gateway.url", value, allowedProtocols: ["ws:", "wss:"] });
+  }
+}
+
+function validateConfig(config) {
+  validateGatewayUrl(config.gateway.url);
+  validatePositiveInteger(config.gateway.reconnectMs, "gateway.reconnectMs");
+  validatePositiveInteger(config.gateway.openTimeoutMs, "gateway.openTimeoutMs");
+  validatePositiveInteger(config.gateway.eventTimeoutMs, "gateway.eventTimeoutMs");
+  validatePositiveInteger(config.gateway.requestTimeoutMs, "gateway.requestTimeoutMs");
+  validatePositiveInteger(config.approvals.askTimeoutMs, "approvals.askTimeoutMs");
+  validatePositiveInteger(config.runner.maxOutputBytes, "runner.maxOutputBytes");
+
+  if (!config.gateway.token && (typeof config.gateway.tokenEnv !== "string" || config.gateway.tokenEnv.trim().length === 0)) {
+    throw configError("invalid gateway.tokenEnv", { key: "gateway.tokenEnv", value: config.gateway.tokenEnv });
+  }
+
+  if (!path.isAbsolute(config.runner.defaultCwd)) {
+    throw configError("invalid runner.defaultCwd", { key: "runner.defaultCwd", value: config.runner.defaultCwd });
+  }
+
+  if (typeof config.gateway.handshakeProfile !== "string" || !["auto", "modern", "legacy"].includes(config.gateway.handshakeProfile)) {
+    throw configError("invalid gateway.handshakeProfile", {
+      key: "gateway.handshakeProfile",
+      value: config.gateway.handshakeProfile,
+      allowed: ["auto", "modern", "legacy"]
+    });
+  }
+
+  if (typeof config.logging.level !== "string" || !["silent", "error", "info"].includes(config.logging.level)) {
+    throw configError("invalid logging.level", {
+      key: "logging.level",
+      value: config.logging.level,
+      allowed: ["silent", "error", "info"]
+    });
+  }
 }
 
 export async function loadConfig(filePath, { readJsonFile }) {
@@ -99,12 +163,13 @@ export async function loadConfig(filePath, { readJsonFile }) {
   const userConfig = filePath
     ? await readJsonFile(filePath, {}, { errorCode: "INVALID_CONFIG_JSON", errorMessage: "invalid config JSON" })
     : {};
+
   const merged = deepMerge(DEFAULT_CONFIG, userConfig ?? {});
   const storageDir = expandConfigPath(merged.storage.dir, baseDir);
   const gatewayToken =
     process.env[merged.gateway.tokenEnv] || merged.gateway.token || process.env.OPENCLAW_GATEWAY_TOKEN || null;
 
-  return {
+  const resolvedConfig = {
     ...merged,
     gateway: {
       ...merged.gateway,
@@ -141,4 +206,7 @@ export async function loadConfig(filePath, { readJsonFile }) {
       }))
     }
   };
+
+  validateConfig(resolvedConfig);
+  return resolvedConfig;
 }

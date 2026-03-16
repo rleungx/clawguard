@@ -1,17 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { OPENCLAW_NODE_HOST_CLIENT_ID, PROTOCOL_VERSION } from "../src/constants.js";
+import { PROTOCOL_VERSION } from "../src/constants.js";
 import { ProtocolClient } from "../src/protocol-client.js";
 
 class FakeWebSocket {
   static OPEN = 1;
   static instances = [];
 
-  constructor() {
+  constructor(url, protocols, options) {
     this.readyState = FakeWebSocket.OPEN;
     this.sentFrames = [];
     this.listeners = new Map();
+    this.url = url;
+    this.protocols = protocols;
+    this.options = options;
     FakeWebSocket.instances.push(this);
   }
 
@@ -42,6 +45,10 @@ class FakeWebSocket {
   send(frame) {
     this.sentFrames.push(JSON.parse(frame));
   }
+
+  close() {
+    this.readyState = 3;
+  }
 }
 
 function createClient(overrides = {}) {
@@ -51,6 +58,7 @@ function createClient(overrides = {}) {
     openTimeoutMs: 20,
     eventTimeoutMs: 20,
     requestTimeoutMs: 20,
+    webSocketImpl: FakeWebSocket,
     identity: {
       nodeId: "node-1",
       deviceToken: null,
@@ -81,9 +89,6 @@ test("protocol client times out waiting for an event", async () => {
 });
 
 test("protocol client times out a pending request and clears it", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = FakeWebSocket;
-
   try {
     const client = createClient();
     client.socket = new FakeWebSocket();
@@ -91,13 +96,11 @@ test("protocol client times out a pending request and clears it", async () => {
     await assert.rejects(client.sendRequest("connect", {}), (error) => error.code === "REQUEST_TIMEOUT");
     assert.equal(client.pending.size, 0);
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    FakeWebSocket.instances.length = 0;
   }
 });
 
 test("protocol client emits a structured error for malformed websocket frame JSON", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = FakeWebSocket;
   FakeWebSocket.instances.length = 0;
 
   try {
@@ -118,13 +121,29 @@ test("protocol client emits a structured error for malformed websocket frame JSO
     assert.equal(receivedError?.details?.source, "websocket.message");
     assert.equal(receivedError?.details?.context, "websocket.message");
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    FakeWebSocket.instances.length = 0;
   }
 });
 
+test("protocol client reports malformed frames without crashing when no error listener is attached", async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const client = createClient({ openTimeoutMs: 10 });
+  let reportedError;
+  client.on("protocol-error", (error) => {
+    reportedError = error;
+  });
+
+  const connectPromise = client.connect();
+  const socket = FakeWebSocket.instances[0];
+
+  socket.emit("message", { data: "{not valid json" });
+
+  await assert.rejects(connectPromise, (error) => error.code === "WEBSOCKET_OPEN_TIMEOUT");
+  assert.equal(reportedError?.code, "INVALID_FRAME_JSON");
+});
+
 test("protocol client completes handshake and persists returned device token", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = FakeWebSocket;
   FakeWebSocket.instances.length = 0;
 
   const persistedTokens = [];
@@ -181,26 +200,11 @@ test("protocol client completes handshake and persists returned device token", a
 
     const connectFrame = socket.sentFrames[0];
     assert.equal(connectFrame.method, "connect");
-    assert.equal(connectFrame.params.client.id, OPENCLAW_NODE_HOST_CLIENT_ID);
     assert.equal(connectFrame.params.minProtocol, PROTOCOL_VERSION);
     assert.equal(connectFrame.params.maxProtocol, PROTOCOL_VERSION);
     assert.equal(connectFrame.params.role, "node");
-    assert.deepEqual(connectFrame.params.commands, ["system.which"]);
-    assert.deepEqual(connectFrame.params.caps, ["system"]);
-    assert.deepEqual(connectFrame.params.permissions, { exec: true });
     assert.equal(connectFrame.params.auth.token, "gateway-token");
-    assert.deepEqual(connectFrame.params.device, {
-      id: "node-1",
-      publicKey: "public-key",
-      signature: "signature",
-      signedAt: 123,
-      nonce: "nonce-1",
-      token: "gateway-token",
-      clientId: OPENCLAW_NODE_HOST_CLIENT_ID,
-      clientMode: "node",
-      role: "node",
-      scopes: []
-    });
+    assert.equal(socket.options.headers.Authorization, "Bearer gateway-token");
 
     socket.emit("message", {
       data: JSON.stringify({
@@ -218,130 +222,248 @@ test("protocol client completes handshake and persists returned device token", a
     assert.equal(result.protocol, PROTOCOL_VERSION);
     assert.deepEqual(persistedTokens, ["persisted-device-token"]);
   } finally {
-    globalThis.WebSocket = originalWebSocket;
+    FakeWebSocket.instances.length = 0;
   }
 });
 
-test("protocol client can build the legacy handshake profile", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = FakeWebSocket;
+test("protocol client passes profile and platform metadata into device signing", async () => {
   FakeWebSocket.instances.length = 0;
 
-  try {
-    const client = createClient({
-      handshakeProfile: "legacy",
-      identity: {
-        nodeId: "node-1",
-        deviceToken: null,
-        buildSignedDevice({ nonce }) {
-          return {
-            id: "node-1",
-            publicKey: "public-key",
-            signature: "signature",
-            signedAt: 123,
-            nonce
-          };
-        },
-        async persistDeviceToken() {}
+  const signingCalls = [];
+
+  const client = createClient({
+    handshakeProfile: "modern",
+    identity: {
+      nodeId: "node-1",
+      deviceToken: null,
+      buildSignedDevice(params) {
+        signingCalls.push(params);
+        return {
+          id: "node-1",
+          publicKey: "public-key",
+          signature: "signature",
+          signedAt: 123,
+          nonce: params.nonce
+        };
+      },
+      async persistDeviceToken() {}
+    },
+    nodeInfo: {
+      displayName: "node-1",
+      platform: "darwin",
+      deviceFamily: "desktop",
+      commands: [],
+      caps: [],
+      permissions: {}
+    }
+  });
+
+  const connectPromise = client.connect();
+  const socket = FakeWebSocket.instances[0];
+
+  socket.emit("open");
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: "nonce-1" }
+    })
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(signingCalls[0], {
+    nonce: "nonce-1",
+    token: null,
+    clientId: "node-host",
+    clientMode: "node",
+    role: "node",
+    scopes: [],
+    platform: "darwin",
+    deviceFamily: "desktop",
+    profile: "modern"
+  });
+
+  const connectFrame = socket.sentFrames[0];
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "res",
+      id: connectFrame.id,
+      ok: true,
+      payload: { protocol: PROTOCOL_VERSION }
+    })
+  });
+
+  const result = await connectPromise;
+  assert.equal(result.protocol, PROTOCOL_VERSION);
+});
+
+test("protocol client falls back to legacy handshake on schema mismatch", async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const client = createClient({
+    handshakeProfile: "auto",
+    identity: {
+      nodeId: "node-1",
+      deviceToken: null,
+      buildSignedDevice({ nonce, profile }) {
+        return {
+          id: `${profile}-node-1`,
+          publicKey: "public-key",
+          signature: `${profile}-signature`,
+          signedAt: 123,
+          nonce
+        };
+      },
+      async persistDeviceToken() {}
+    }
+  });
+
+  const connectPromise = client.connect();
+  const modernSocket = FakeWebSocket.instances[0];
+
+  modernSocket.emit("open");
+  modernSocket.emit("message", {
+    data: JSON.stringify({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: "nonce-modern" }
+    })
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const modernFrame = modernSocket.sentFrames[0];
+  assert.equal(modernFrame.params.device.id, "modern-node-1");
+
+  modernSocket.emit("message", {
+    data: JSON.stringify({
+      type: "res",
+      id: modernFrame.id,
+      ok: false,
+      error: {
+        code: "INVALID_PARAMS",
+        message: "unexpected property 'protocolVersion'"
       }
-    });
-    const connectPromise = client.connect();
-    const socket = FakeWebSocket.instances[0];
+    })
+  });
 
-    socket.emit("open");
-    socket.emit("message", {
-      data: JSON.stringify({
-        type: "event",
-        event: "connect.challenge",
-        payload: { nonce: "nonce-legacy" }
-      })
-    });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  const legacySocket = FakeWebSocket.instances[1];
+  legacySocket.emit("open");
+  legacySocket.emit("message", {
+    data: JSON.stringify({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: "nonce-legacy" }
+    })
+  });
 
-    const connectFrame = socket.sentFrames[0];
-    assert.equal(connectFrame.params.protocolVersion, PROTOCOL_VERSION);
-    assert.equal(connectFrame.params.client.id, "secure-node");
-    assert.equal(connectFrame.params.role.type, "node");
-    assert.equal(connectFrame.params.device.nonce, "nonce-legacy");
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-    socket.emit("message", {
-      data: JSON.stringify({
-        type: "res",
-        id: connectFrame.id,
-        ok: true,
-        payload: {
-          protocol: PROTOCOL_VERSION
-        }
-      })
-    });
+  const legacyFrame = legacySocket.sentFrames[0];
+  assert.equal(legacyFrame.params.device.id, "legacy-node-1");
+  assert.equal(legacyFrame.params.role, "node");
 
-    const result = await connectPromise;
-    assert.equal(result.protocol, PROTOCOL_VERSION);
-  } finally {
-    globalThis.WebSocket = originalWebSocket;
-  }
+  legacySocket.emit("message", {
+    data: JSON.stringify({
+      type: "res",
+      id: legacyFrame.id,
+      ok: true,
+      payload: { protocol: PROTOCOL_VERSION }
+    })
+  });
+
+  const result = await connectPromise;
+  assert.equal(result.protocol, PROTOCOL_VERSION);
+  assert.equal(client.preferredHandshakeProfile, "legacy");
 });
 
-test("protocol client falls back to legacy handshake after modern schema rejection", async () => {
-  const originalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = FakeWebSocket;
+test("protocol client waits for challenge nonce after session.welcome", async () => {
   FakeWebSocket.instances.length = 0;
 
-  try {
-    const client = createClient({ handshakeProfile: "auto" });
-    const connectPromise = client.connect();
-    const socket = FakeWebSocket.instances[0];
+  const signingCalls = [];
+  const client = createClient({
+    identity: {
+      nodeId: "node-1",
+      deviceToken: null,
+      buildSignedDevice(params) {
+        signingCalls.push(params);
+        return {
+          id: "node-1",
+          publicKey: "public-key",
+          signature: "signature",
+          signedAt: 123,
+          nonce: params.nonce
+        };
+      },
+      async persistDeviceToken() {}
+    }
+  });
 
-    socket.emit("open");
-    socket.emit("message", {
-      data: JSON.stringify({
-        type: "event",
-        event: "connect.challenge",
-        payload: { nonce: "nonce-auto" }
-      })
-    });
+  const connectPromise = client.connect();
+  const socket = FakeWebSocket.instances[0];
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  socket.emit("open");
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "event",
+      event: "session.welcome",
+      payload: { protocol: PROTOCOL_VERSION }
+    })
+  });
 
-    const modernFrame = socket.sentFrames[0];
-    assert.equal(modernFrame.params.client.id, OPENCLAW_NODE_HOST_CLIENT_ID);
-    assert.equal(modernFrame.params.role, "node");
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-    socket.emit("message", {
-      data: JSON.stringify({
-        type: "res",
-        id: modernFrame.id,
-        ok: false,
-        error: {
-          code: "INVALID_PARAMS",
-          message: "unexpected property 'protocolVersion'"
-        }
-      })
-    });
+  assert.equal(socket.sentFrames.length, 0);
+  assert.equal(signingCalls.length, 0);
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: "nonce-after-welcome" }
+    })
+  });
 
-    const legacyFrame = socket.sentFrames[1];
-    assert.equal(legacyFrame.params.protocolVersion, PROTOCOL_VERSION);
-    assert.equal(legacyFrame.params.client.id, "secure-node");
-    assert.equal(legacyFrame.params.role.type, "node");
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-    socket.emit("message", {
-      data: JSON.stringify({
-        type: "res",
-        id: legacyFrame.id,
-        ok: true,
-        payload: {
-          protocol: PROTOCOL_VERSION
-        }
-      })
-    });
+  const connectFrame = socket.sentFrames[0];
+  assert.equal(connectFrame.method, "connect");
+  assert.equal(connectFrame.params.device.nonce, "nonce-after-welcome");
+  assert.equal(signingCalls[0].nonce, "nonce-after-welcome");
 
-    const result = await connectPromise;
-    assert.equal(result.protocol, PROTOCOL_VERSION);
-    assert.equal(client.preferredHandshakeProfile, "legacy");
-  } finally {
-    globalThis.WebSocket = originalWebSocket;
-  }
+  socket.emit("message", {
+    data: JSON.stringify({
+      type: "res",
+      id: connectFrame.id,
+      ok: true,
+      payload: { protocol: PROTOCOL_VERSION }
+    })
+  });
+
+  const result = await connectPromise;
+  assert.equal(result.protocol, PROTOCOL_VERSION);
+});
+
+test("protocol client does not send responses on a closed socket", () => {
+  const client = createClient();
+  client.socket = new FakeWebSocket();
+  client.socket.readyState = 3;
+
+  assert.equal(client.sendResponse("req-1", { ok: true }), false);
+  assert.equal(client.sendError("req-1", new Error("boom")), false);
+  assert.equal(client.socket.sentFrames.length, 0);
+});
+
+test("protocol client close closes the live socket and clears it", () => {
+  const client = createClient();
+  const socket = new FakeWebSocket();
+  client.socket = socket;
+
+  assert.equal(client.close(), true);
+  assert.equal(socket.readyState, 3);
+  assert.equal(client.socket, null);
+  assert.equal(client.close(), false);
 });

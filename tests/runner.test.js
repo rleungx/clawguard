@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import { executeRun, normalizeRunPlan } from "../src/runner.js";
 
 test("runner executes an allowed argv command and captures output", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-runner-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-runner-"));
   const config = {
     policy: {
       envAllowlist: ["LANG", "TERM"],
@@ -35,7 +35,7 @@ test("runner executes an allowed argv command and captures output", async () => 
 });
 
 test("runner executes a bare command name after resolving it from PATH", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-runner-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-runner-"));
   const config = {
     policy: {
       envAllowlist: ["LANG", "TERM"],
@@ -71,7 +71,7 @@ test("runner executes a bare command name after resolving it from PATH", async (
 });
 
 test("runner truncates oversized stdout while preserving the cap marker", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-runner-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-runner-"));
   const config = {
     policy: {
       envAllowlist: ["LANG", "TERM"],
@@ -100,7 +100,7 @@ test("runner truncates oversized stdout while preserving the cap marker", async 
 });
 
 test("runner truncates oversized stderr while preserving the cap marker", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "secure-node-runner-"));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawguard-runner-"));
   const config = {
     policy: {
       envAllowlist: ["LANG", "TERM"],

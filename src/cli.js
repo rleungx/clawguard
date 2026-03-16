@@ -23,12 +23,12 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`secure-node
+  console.log(`clawguard
 
 Usage:
-  secure-node run [--config path]
-  secure-node print-config [--config path]
-  secure-node help
+  clawguard run [--config path]
+  clawguard print-config [--config path]
+  clawguard help
 `);
 }
 

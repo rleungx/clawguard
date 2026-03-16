@@ -79,11 +79,11 @@ function truncateText(text, maxBytes) {
   }
 
   const truncated = Buffer.from(text).subarray(0, maxBytes).toString("utf8");
-  return `${truncated}\n[secure-node] output truncated to ${maxBytes} bytes`;
+  return `${truncated}\n[clawguard] output truncated to ${maxBytes} bytes`;
 }
 
 function appendTruncationNotice(text, maxBytes) {
-  return `${text}\n[secure-node] output truncated to ${maxBytes} bytes`;
+  return `${text}\n[clawguard] output truncated to ${maxBytes} bytes`;
 }
 
 function createOutputCollector(maxBytes) {

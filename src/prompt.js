@@ -24,7 +24,7 @@ export class LocalApprover {
       }, this.askTimeoutMs);
 
       try {
-        process.stdout.write("\n[secure-node] approval required\n");
+        process.stdout.write("\n[clawguard] approval required\n");
         process.stdout.write(`agent: ${details.agentId || "*"}\n`);
         process.stdout.write(`cwd: ${details.cwd}\n`);
         process.stdout.write(`command: ${details.displayCommand}\n`);
