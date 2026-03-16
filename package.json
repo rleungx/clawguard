@@ -1,14 +1,17 @@
 {
-  "name": "secure-node",
+  "name": "clawguard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "A policy-enforced OpenClaw node host MVP",
   "bin": {
-    "secure-node": "./bin/secure-node.js"
+    "clawguard": "./bin/clawguard.js"
   },
   "scripts": {
-    "start": "node ./bin/secure-node.js run --config ./examples/secure-node.config.json",
+    "start": "node ./bin/clawguard.js run --config ./examples/clawguard.config.json",
     "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
   }
 }

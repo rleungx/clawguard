@@ -1,13 +1,13 @@
-# secure-node Design
+# clawguard Design
 
 ## Summary
 
-`secure-node` is a standalone OpenClaw-compatible node host that sits below the model and above the real execution environment.
+`clawguard` is a standalone OpenClaw-compatible node host that sits below the model and above the real execution environment.
 
 Its job is simple:
 
 - OpenClaw decides what it wants to do.
-- `secure-node` decides whether that action is allowed, whether it requires approval, and where it should run.
+- `clawguard` decides whether that action is allowed, whether it requires approval, and where it should run.
 
 The current implementation is an MVP focused on `system.run`, `system.which`, and local `exec approvals` compatibility. The project is intentionally narrow: it does not replace Gateway, agent planning, or the broader OpenClaw tool system. It acts as a hardened execution broker.
 
@@ -52,7 +52,7 @@ The project exists to reduce blast radius by moving command execution behind a p
 flowchart LR
   U["User or untrusted content"] --> G["OpenClaw Gateway"]
   G --> M["Model decides to use exec"]
-  M --> N["secure-node"]
+  M --> N["clawguard"]
   N --> P["Policy engine"]
   P --> A["Approval layer"]
   P --> R["Runner"]
@@ -71,7 +71,7 @@ The system is split into small modules with clear responsibilities.
 
 Files:
 
-- `bin/secure-node.js`
+- `bin/clawguard.js`
 - `src/cli.js`
 
 Responsibilities:

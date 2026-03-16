@@ -5,22 +5,23 @@
     "reconnectMs": 3000,
     "openTimeoutMs": 10000,
     "eventTimeoutMs": 10000,
-    "requestTimeoutMs": 15000
+    "requestTimeoutMs": 15000,
+    "handshakeProfile": "auto"
   },
   "storage": {
-    "dir": "../.secure-node"
+    "dir": "../.clawguard"
   },
   "approvals": {
-    "path": "../.secure-node/exec-approvals.json",
+    "path": "../.clawguard/exec-approvals.json",
     "askMode": "tty",
     "askFallback": "deny",
     "askTimeoutMs": 300000
   },
   "audit": {
-    "path": "../.secure-node/audit.jsonl"
+    "path": "../.clawguard/audit.jsonl"
   },
   "node": {
-    "displayName": "safe-build-node",
+    "displayName": "clawguard-node",
     "browserToolsEnabled": false,
     "browserProxyEnabled": false
   },

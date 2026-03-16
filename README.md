@@ -1,98 +1,89 @@
-# secure-node
+# clawguard
 
-`secure-node` is a small OpenClaw-compatible node host MVP that adds a local policy gate in front of `system.run`.
+`clawguard` is a small OpenClaw-compatible node host that puts a local policy and approval layer in front of `system.run`.
 
-It is designed for the "safe node host / exec broker" shape:
+## One prompt
 
-- OpenClaw keeps handling chat, planning, and tool routing.
-- `secure-node` registers as a node and exposes `system.run`, `system.which`, `system.execApprovals.get`, and `system.execApprovals.set`.
-- Every incoming command is evaluated against a local policy file and a local approval allowlist before it is executed.
+If you want OpenClaw to install and run it for you, paste this:
 
-## What this MVP does
-
-- Connects to an OpenClaw Gateway over WebSocket and identifies itself as a node host.
-- Persists a local device identity and cached device token.
-- Enforces a JSON policy file with `allow` / `ask` / `deny` decisions.
-- Enforces a second approval layer using a local `exec-approvals.json` file.
-- Supports local TTY prompts for `ask` decisions.
-- Writes JSONL audit events for connection, decision, and execution outcomes.
-
-## What this MVP does not do yet
-
-- Gateway-mediated approval broadcast flow.
-- Container or VM sandboxing.
-- Network isolation.
-- Full PTY / background process parity with OpenClaw's richer `exec` modes.
-- Browser proxy support.
-
-## Project layout
-
-- `bin/secure-node.js`
-- `src/cli.js`
-- `src/node-host.js`
-- `src/protocol-client.js`
-- `src/policy.js`
-- `src/approvals-store.js`
-- `src/runner.js`
-
-## Usage
-
-1. Export a gateway token:
-
-```bash
-export OPENCLAW_GATEWAY_TOKEN=...
+```text
+Read https://raw.githubusercontent.com/rleungx/clawguard/main/SKILL.md and follow the instructions to install and configure clawguard for OpenClaw.
 ```
 
-2. Inspect the effective config:
+## Quick start
 
 ```bash
-node ./bin/secure-node.js print-config --config ./examples/secure-node.config.json
+git clone git@github.com:rleungx/clawguard.git
+cd clawguard
+npm install
+export OPENCLAW_GATEWAY_TOKEN=your-token
+node ./bin/clawguard.js print-config --config ./examples/clawguard.config.json
+node ./bin/clawguard.js run --config ./examples/clawguard.config.json
 ```
 
-3. Run the node host:
+## What it exposes
 
-```bash
-node ./bin/secure-node.js run --config ./examples/secure-node.config.json
-```
+- `system.run`
+- `system.which`
+- `system.execApprovals.get`
+- `system.execApprovals.set`
 
-4. Approve the device from OpenClaw:
+Every command goes through:
+
+- local JSON policy rules
+- local approval allowlist
+- optional local TTY approval prompt
+- JSONL audit logging
+
+## Minimal OpenClaw flow
+
+After `clawguard` is running:
 
 ```bash
 openclaw devices list
 openclaw devices approve <requestId>
 openclaw nodes status
-```
-
-5. Point execution at the node:
-
-```bash
 openclaw config set tools.exec.host node
-openclaw config set tools.exec.node safe-build-node
+openclaw config set tools.exec.node clawguard-node
 ```
 
-## Config shape
+## Example config
 
-The config file is JSON to keep the MVP dependency-free.
+The included config lives at `examples/clawguard.config.json`.
 
 ```json
 {
   "gateway": {
     "url": "ws://127.0.0.1:18789",
     "tokenEnv": "OPENCLAW_GATEWAY_TOKEN",
+    "reconnectMs": 3000,
     "openTimeoutMs": 10000,
     "eventTimeoutMs": 10000,
-    "requestTimeoutMs": 15000
+    "requestTimeoutMs": 15000,
+    "handshakeProfile": "auto"
+  },
+  "storage": {
+    "dir": "../.clawguard"
+  },
+  "audit": {
+    "path": "../.clawguard/audit.jsonl"
+  },
+  "logging": {
+    "level": "info"
+  },
+  "approvals": {
+    "path": "../.clawguard/exec-approvals.json",
+    "askMode": "tty",
+    "askFallback": "deny",
+    "askTimeoutMs": 300000
   },
   "node": {
-    "displayName": "safe-build-node",
+    "displayName": "clawguard-node",
     "browserToolsEnabled": false,
     "browserProxyEnabled": false
   },
-  "approvals": {
-    "askTimeoutMs": 300000
-  },
   "runner": {
-    "defaultCwd": ".",
+    "defaultCwd": "..",
     "maxOutputBytes": 1048576
   },
   "policy": {
@@ -100,11 +91,12 @@ The config file is JSON to keep the MVP dependency-free.
     "allowShellText": false,
     "denyPaths": [
       "~/.ssh/**",
-      "~/.aws/**"
+      "~/.aws/**",
+      "~/.openclaw/**"
     ],
     "commandRules": [
       {
-        "id": "allow-git-status",
+        "id": "allow-git-readonly",
         "action": "allow",
         "match": {
           "binary": [
@@ -116,7 +108,23 @@ The config file is JSON to keep the MVP dependency-free.
           ]
         },
         "cwd": [
-          "./**"
+          "../**"
+        ]
+      },
+      {
+        "id": "allow-node-test",
+        "action": "allow",
+        "match": {
+          "binary": [
+            "/usr/bin/node",
+            "/Users/rleungx/.nvm/versions/node/v22.22.1/bin/node"
+          ],
+          "argvIncludes": [
+            "--test"
+          ]
+        },
+        "cwd": [
+          "../**"
         ]
       }
     ]
@@ -124,52 +132,15 @@ The config file is JSON to keep the MVP dependency-free.
 }
 ```
 
-Useful operator knobs:
+## Useful knobs
 
-- `gateway.openTimeoutMs`: fail the initial websocket open if the gateway never accepts the connection.
-- `gateway.eventTimeoutMs`: bound waits for challenge/welcome and other protocol events.
-- `gateway.requestTimeoutMs`: bound request/response waits such as `connect` and `node.invoke.result`.
-- `approvals.askTimeoutMs`: default timeout for local TTY approval prompts.
-- `runner.defaultCwd`: base working directory when a run request omits `cwd`.
-- `runner.maxOutputBytes`: per-stream output cap for `stdout` and `stderr`.
-
-## Approval file
-
-`system.execApprovals.get` and `system.execApprovals.set` read and write a local JSON file like this:
-
-```json
-{
-  "version": 1,
-  "socket": null,
-  "defaults": {
-    "security": "deny",
-    "ask": "on-miss",
-    "askFallback": "deny",
-    "autoAllowSkills": false
-  },
-  "agents": {
-    "*": {
-      "security": "allowlist",
-      "ask": "on-miss",
-      "askFallback": "deny",
-      "autoAllowSkills": false,
-      "allowlist": [
-        {
-          "id": "entry-1",
-          "pattern": "/usr/bin/git"
-        }
-      ]
-    },
-    "ci-agent": {
-      "security": "full",
-      "ask": "never",
-      "askFallback": "deny",
-      "autoAllowSkills": false,
-      "allowlist": []
-    }
-  }
-}
-```
+- `gateway.handshakeProfile`: `auto`, `modern`, or `legacy`
+- `gateway.openTimeoutMs`: websocket open timeout
+- `gateway.eventTimeoutMs`: handshake/event wait timeout
+- `gateway.requestTimeoutMs`: request/response timeout
+- `runner.maxOutputBytes`: per-stream output cap
+- `approvals.askTimeoutMs`: local prompt timeout
+- `logging.level`: `silent`, `error`, or `info`
 
 ## Development
 
