@@ -9,16 +9,16 @@
     "handshakeProfile": "auto"
   },
   "storage": {
-    "dir": "../.clawguard"
+    "dir": "~/.clawguard"
   },
   "approvals": {
-    "path": "../.clawguard/exec-approvals.json",
+    "path": "~/.clawguard/exec-approvals.json",
     "askMode": "tty",
     "askFallback": "deny",
     "askTimeoutMs": 300000
   },
   "audit": {
-    "path": "../.clawguard/audit.jsonl"
+    "path": "~/.clawguard/audit.jsonl"
   },
   "node": {
     "displayName": "clawguard-node",
@@ -26,7 +26,7 @@
     "browserProxyEnabled": false
   },
   "runner": {
-    "defaultCwd": "..",
+    "defaultCwd": "~",
     "maxOutputBytes": 1048576
   },
   "policy": {
@@ -37,39 +37,6 @@
       "~/.aws/**",
       "~/.openclaw/**"
     ],
-    "commandRules": [
-      {
-        "id": "allow-git-readonly",
-        "action": "allow",
-        "match": {
-          "binary": [
-            "/usr/bin/git",
-            "/opt/homebrew/bin/git"
-          ],
-          "argvIncludes": [
-            "status"
-          ]
-        },
-        "cwd": [
-          "../**"
-        ]
-      },
-      {
-        "id": "allow-node-test",
-        "action": "allow",
-        "match": {
-          "binary": [
-            "/usr/bin/node",
-            "/Users/rleungx/.nvm/versions/node/v22.22.1/bin/node"
-          ],
-          "argvIncludes": [
-            "--test"
-          ]
-        },
-        "cwd": [
-          "../**"
-        ]
-      }
-    ]
+    "commandRules": []
   }
 }
