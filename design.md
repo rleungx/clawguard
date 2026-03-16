@@ -9,7 +9,7 @@ Its job is simple:
 - OpenClaw decides what it wants to do.
 - `clawguard` decides whether that action is allowed, whether it requires approval, and where it should run.
 
-The current implementation is an MVP focused on `system.run`, `system.which`, and local `exec approvals` compatibility. The project is intentionally narrow: it does not replace Gateway, agent planning, or the broader OpenClaw tool system. It acts as a hardened execution broker.
+The current implementation is an MVP focused on `system.run`, `system.which`, `system.execApprovals.get`, `system.execApprovals.set`, and compatibility with both direct requests and `node.invoke`-style execution flows. The project is intentionally narrow: it does not replace Gateway, agent planning, or the broader OpenClaw tool system. It acts as a hardened execution broker.
 
 ## Problem Statement
 
@@ -83,6 +83,7 @@ Responsibilities:
 Current commands:
 
 - `run`
+- `init-config`
 - `print-config`
 - `help`
 
@@ -322,6 +323,7 @@ Main sections:
 - `policy`
 - `runner`
 - `audit`
+- `logging`
 
 Notable fields:
 
@@ -441,12 +443,13 @@ Behavior:
 
 ## Why Node.js
 
-The MVP uses modern Node.js with no third-party dependencies.
+The MVP uses modern Node.js with a deliberately small dependency surface.
 
 Reasons:
 
 - Easy single-process prototyping.
-- Built-in WebSocket support in recent Node versions.
+- Mature process and crypto primitives in the standard library.
+- A single runtime dependency (`ws`) keeps WebSocket behavior explicit and easy to swap later.
 - Good enough process management for the MVP.
 - Lower setup overhead while the protocol and policy model are still shifting.
 
@@ -456,18 +459,22 @@ This is an implementation choice, not a product commitment. A future Go rewrite 
 
 Current tests cover:
 
+- CLI config bootstrapping.
 - Config path resolution.
+- Config validation failures.
 - Policy rule matching.
 - Deny-path enforcement.
 - Approval default behavior.
 - Approval persistence.
+- Identity signing compatibility.
+- Protocol frame parsing, timeout handling, handshake fallback, and token persistence.
+- Node host request routing and dropped-reply handling.
 - Runner process execution.
 
 What is still missing:
 
-- Protocol frame compatibility tests.
-- Snapshot tests for `connect` request payloads.
 - Integration tests against a real OpenClaw Gateway.
+- Full service-loop tests that exercise reconnect behavior against a live or higher-fidelity socket peer.
 - End-to-end tests for approval prompts.
 
 ## MVP Status
